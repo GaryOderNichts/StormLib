@@ -34,7 +34,11 @@
 // Local functions - platform-specific functions
 
 #ifndef STORMLIB_WINDOWS
+#ifndef STORMLIB_WIIU // WIIU doesn't support thread_local
 static thread_local DWORD dwLastError = ERROR_SUCCESS;
+#else
+static DWORD dwLastError = ERROR_SUCCESS;
+#endif
 
 DWORD GetLastError()
 {
@@ -105,7 +109,7 @@ static bool BaseFile_Create(TFileStream * pStream)
     }
 #endif
 
-#if defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)
+#if (defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)) && !defined(STORMLIB_WIIU)
     {
         intptr_t handle;
 
@@ -118,6 +122,34 @@ static bool BaseFile_Create(TFileStream * pStream)
         }
 
         pStream->Base.File.hFile = (HANDLE)handle;
+    }
+#endif
+
+#if defined(STORMLIB_WIIU)
+    {
+        FILE * handle;
+        char * buffer;
+
+        handle = fopen(pStream->szFileName, "rb+");
+        if(!handle)
+        {
+            pStream->Base.File.hFile = INVALID_HANDLE_VALUE;
+            dwLastError = errno;
+            return false;
+        }
+
+        buffer = (char *) memalign(0x40, STORMLIB_WIIU_IO_BUFFER_SIZE);
+        if (!buffer)
+        {
+            pStream->Base.File.hFile = INVALID_HANDLE_VALUE;
+            dwLastError = ERROR_NOT_ENOUGH_MEMORY;
+            return false;
+        }
+
+        setvbuf(handle, buffer, _IOFBF, STORMLIB_WIIU_IO_BUFFER_SIZE);
+
+        pStream->Base.File.hFile = (HANDLE)handle;
+        pStream->Base.File.Buffer = buffer;
     }
 #endif
 
@@ -155,7 +187,7 @@ static bool BaseFile_Open(TFileStream * pStream, const TCHAR * szFileName, DWORD
     }
 #endif
 
-#if defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)
+#if (defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)) && !defined(STORMLIB_WIIU)
     {
         struct stat64 fileinfo;
         int oflag = (dwStreamFlags & STREAM_FLAG_READ_ONLY) ? O_RDONLY : O_RDWR;
@@ -185,6 +217,51 @@ static bool BaseFile_Open(TFileStream * pStream, const TCHAR * szFileName, DWORD
         pStream->Base.File.FileTime = 0x019DB1DED53E8000ULL + (10000000 * fileinfo.st_mtime);
         pStream->Base.File.FileSize = (ULONGLONG)fileinfo.st_size;
         pStream->Base.File.hFile = (HANDLE)handle;
+    }
+#endif
+
+#if defined(STORMLIB_WIIU)
+    // I/O on the Wii U can be extremely slow, this implementation uses stdio functions with caching
+    {
+        struct stat64 fileinfo;
+        const char * mode = (dwStreamFlags & STREAM_FLAG_READ_ONLY) ? "rb" : "rb+";
+        FILE * handle;
+        char * buffer;
+
+        // Get the file size
+        if(stat64(szFileName, &fileinfo) == -1)
+        {
+            pStream->Base.File.hFile = INVALID_HANDLE_VALUE;
+            dwLastError = errno;
+            return false;
+        }
+
+        // Open the file
+        handle = fopen(szFileName, mode);
+        if(!handle)
+        {
+            pStream->Base.File.hFile = INVALID_HANDLE_VALUE;
+            dwLastError = errno;
+            return false;
+        }
+
+        buffer = (char *) memalign(0x40, STORMLIB_WIIU_IO_BUFFER_SIZE);
+        if (!buffer)
+        {
+            pStream->Base.File.hFile = INVALID_HANDLE_VALUE;
+            dwLastError = ERROR_NOT_ENOUGH_MEMORY;
+            return false;
+        }
+
+        int res = setvbuf(handle, buffer, _IOFBF, STORMLIB_WIIU_IO_BUFFER_SIZE);
+
+        // time_t is number of seconds since 1.1.1970, UTC.
+        // 1 second = 10000000 (decimal) in FILETIME
+        // Set the start to 1.1.1970 00:00:00
+        pStream->Base.File.FileTime = 0x019DB1DED53E8000ULL + (10000000 * fileinfo.st_mtime);
+        pStream->Base.File.FileSize = (ULONGLONG)fileinfo.st_size;
+        pStream->Base.File.hFile = (HANDLE)handle;
+        pStream->Base.File.Buffer = buffer;
     }
 #endif
 
@@ -226,7 +303,7 @@ static bool BaseFile_Read(
     }
 #endif
 
-#if defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)
+#if (defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)) && !defined(STORMLIB_WIIU)
     {
         ssize_t bytes_read;
 
@@ -242,6 +319,33 @@ static bool BaseFile_Read(
         if(dwBytesToRead != 0)
         {
             bytes_read = read((intptr_t)pStream->Base.File.hFile, pvBuffer, (size_t)dwBytesToRead);
+            if(bytes_read == -1)
+            {
+                dwLastError = errno;
+                return false;
+            }
+
+            dwBytesRead = (DWORD)(size_t)bytes_read;
+        }
+    }
+#endif
+
+#if defined(STORMLIB_WIIU)
+    {
+        ssize_t bytes_read;
+
+        // If the byte offset is different from the current file position,
+        // we have to update the file position   xxx
+        if(ByteOffset != pStream->Base.File.FilePos)
+        {
+            fseek((FILE *)pStream->Base.File.hFile, (off64_t)(ByteOffset), SEEK_SET);
+            pStream->Base.File.FilePos = ByteOffset;
+        }
+
+        // Perform the read operation
+        if(dwBytesToRead != 0)
+        {
+            bytes_read = fread(pvBuffer, 1, (size_t)dwBytesToRead, (FILE *)pStream->Base.File.hFile);
             if(bytes_read == -1)
             {
                 dwLastError = errno;
@@ -297,7 +401,7 @@ static bool BaseFile_Write(TFileStream * pStream, ULONGLONG * pByteOffset, const
     }
 #endif
 
-#if defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)
+#if (defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)) && !defined(STORMLIB_WIIU)
     {
         ssize_t bytes_written;
 
@@ -311,6 +415,30 @@ static bool BaseFile_Write(TFileStream * pStream, ULONGLONG * pByteOffset, const
 
         // Perform the read operation
         bytes_written = write((intptr_t)pStream->Base.File.hFile, pvBuffer, (size_t)dwBytesToWrite);
+        if(bytes_written == -1)
+        {
+            dwLastError = errno;
+            return false;
+        }
+
+        dwBytesWritten = (DWORD)(size_t)bytes_written;
+    }
+#endif
+
+#if defined(STORMLIB_WIIU)
+    {
+        ssize_t bytes_written;
+
+        // If the byte offset is different from the current file position,
+        // we have to update the file position
+        if(ByteOffset != pStream->Base.File.FilePos)
+        {
+            fseek((FILE *)pStream->Base.File.hFile, (off64_t)(ByteOffset), SEEK_SET);
+            pStream->Base.File.FilePos = ByteOffset;
+        }
+
+        // Perform the read operation
+        bytes_written = fwrite(pvBuffer, 1, (size_t)dwBytesToWrite, (FILE *)pStream->Base.File.hFile);
         if(bytes_written == -1)
         {
             dwLastError = errno;
@@ -364,7 +492,7 @@ static bool BaseFile_Resize(TFileStream * pStream, ULONGLONG NewFileSize)
     }
 #endif
 
-#if defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)
+#if (defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)) && !defined(STORMLIB_WIIU)
     {
         if(ftruncate64((intptr_t)pStream->Base.File.hFile, (off64_t)NewFileSize) == -1)
         {
@@ -374,6 +502,14 @@ static bool BaseFile_Resize(TFileStream * pStream, ULONGLONG NewFileSize)
 
         pStream->Base.File.FileSize = NewFileSize;
         return true;
+    }
+#endif
+
+#if defined(STORMLIB_WIIU)
+    // TODO
+    {
+        dwLastError = ERROR_NOT_SUPPORTED;
+        return false;
     }
 #endif
 }
@@ -428,8 +564,13 @@ static void BaseFile_Close(TFileStream * pStream)
         CloseHandle(pStream->Base.File.hFile);
 #endif
 
-#if defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)
+#if (defined(STORMLIB_MAC) || defined(STORMLIB_LINUX)) && !defined(STORMLIB_WIIU)
         close((intptr_t)pStream->Base.File.hFile);
+#endif
+
+#if defined(STORMLIB_WIIU)
+        fclose((FILE *)pStream->Base.File.hFile);
+        free(pStream->Base.File.Buffer);
 #endif
     }
 

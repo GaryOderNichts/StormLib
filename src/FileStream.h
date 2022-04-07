@@ -130,6 +130,9 @@ union TBaseProviderData
         ULONGLONG FilePos;                  // Current file position
         ULONGLONG FileTime;                 // Last write time
         HANDLE hFile;                       // File handle
+#ifdef STORMLIB_WIIU
+        char * Buffer;
+#endif
     } File;
 
     struct
